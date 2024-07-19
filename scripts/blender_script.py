@@ -23,6 +23,7 @@ import random
 import sys
 import time
 import urllib.request
+import shutil
 from typing import Tuple
 
 import bpy
@@ -187,10 +188,14 @@ def save_images(object_file: str) -> None:
     empty = bpy.data.objects.new("Empty", None)
     scene.collection.objects.link(empty)
     cam_constraint.target = empty
+
+    azimuths = [0, 30, 90, 150, 210, 270, 330]
+    elevations = [0, 20, -10, 20, -10, 20, -10]
+
     for i in range(args.num_images):
-        # set the camera position
-        theta = (i / args.num_images) * math.pi * 2
-        phi = math.radians(60)
+        theta = math.radians(azimuths[i])
+        phi = math.radians(90 - elevations[i])
+
         point = (
             args.camera_dist * math.sin(phi) * math.cos(theta),
             args.camera_dist * math.sin(phi) * math.sin(theta),
@@ -202,6 +207,7 @@ def save_images(object_file: str) -> None:
         scene.render.filepath = render_path
         bpy.ops.render.render(write_still=True)
 
+    shutil.copy(object_file, os.path.join(args.output_dir, object_uid, os.path.basename(object_file)))
 
 def download_object(object_url: str) -> str:
     """Download the object and return the path."""
