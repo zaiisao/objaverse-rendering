@@ -22,8 +22,9 @@ import os
 import random
 import sys
 import time
-import urllib.request
 import shutil
+import glob
+import urllib.request
 from typing import Tuple
 
 import bpy
@@ -40,11 +41,39 @@ parser.add_argument("--output_dir", type=str, default="./views")
 parser.add_argument(
     "--engine", type=str, default="BLENDER_EEVEE", choices=["CYCLES", "BLENDER_EEVEE"]
 )
-parser.add_argument("--num_images", type=int, default=12)
+parser.add_argument("--num_images", type=int, default=7)
 parser.add_argument("--camera_dist", type=int, default=1.5)
 
 argv = sys.argv[sys.argv.index("--") + 1 :]
 args = parser.parse_args(argv)
+
+import bpy
+
+def enable_gpus(device_type, use_cpus=False):
+    preferences = bpy.context.preferences
+    cycles_preferences = preferences.addons["cycles"].preferences
+    cycles_preferences.refresh_devices()
+    devices = cycles_preferences.devices
+
+    if not devices:
+        raise RuntimeError("Unsupported device type")
+
+    activated_gpus = []
+    for device in devices:
+        if device.type == "CPU":
+            device.use = use_cpus
+        else:
+            device.use = True
+            activated_gpus.append(device.name)
+            print('activated gpu', device.name)
+
+    cycles_preferences.compute_device_type = device_type
+    bpy.context.scene.cycles.device = "GPU"
+
+    return activated_gpus
+
+
+enable_gpus("CUDA")
 
 context = bpy.context
 scene = context.scene
@@ -189,10 +218,33 @@ def save_images(object_file: str) -> None:
     scene.collection.objects.link(empty)
     cam_constraint.target = empty
 
+    scene.use_nodes = True
+    tree = scene.node_tree
+
+    for node in tree.nodes:
+        tree.nodes.remove(node)
+
+    scene.view_layers["ViewLayer"].use_pass_z = True
+
+    render_layers_node = tree.nodes.new('CompositorNodeRLayers')
+    normalize_node = tree.nodes.new("CompositorNodeNormalize")
+    invert_node = tree.nodes.new("CompositorNodeInvert")
+    viewer_node = tree.nodes.new("CompositorNodeViewer")
+    file_output_image_node = tree.nodes.new("CompositorNodeOutputFile")
+    file_output_depth_node = tree.nodes.new("CompositorNodeOutputFile")
+
+    # Set base_path to the directory
+    base_path = os.path.join(args.output_dir, object_uid)
+
+    file_output_image_node.base_path = base_path
+    file_output_depth_node.base_path = base_path
+
     azimuths = [0, 30, 90, 150, 210, 270, 330]
     elevations = [0, 20, -10, 20, -10, 20, -10]
 
-    for i in range(args.num_images):
+    # Configure file_slots to specify file names
+    for i in range(7):
+        # set the camera position
         theta = math.radians(azimuths[i])
         phi = math.radians(90 - elevations[i])
 
@@ -202,12 +254,32 @@ def save_images(object_file: str) -> None:
             args.camera_dist * math.cos(phi),
         )
         cam.location = point
-        # render the image
-        render_path = os.path.join(args.output_dir, object_uid, f"{i:03d}.png")
-        scene.render.filepath = render_path
-        bpy.ops.render.render(write_still=True)
 
-    shutil.copy(object_file, os.path.join(args.output_dir, object_uid, os.path.basename(object_file)))
+        image_file_name = f"{i:03d}.png"
+        depth_file_name = f"{i:03d}_depth.png"
+
+        file_output_image_node.file_slots[0].path = image_file_name
+        file_output_depth_node.file_slots[0].path = depth_file_name
+
+        # Link nodes
+        links = tree.links
+
+        links.new(render_layers_node.outputs['Depth'], normalize_node.inputs['Value'])
+        links.new(normalize_node.outputs['Value'], invert_node.inputs['Color'])
+
+        links.new(invert_node.outputs['Color'], viewer_node.inputs['Image'])
+
+        links.new(render_layers_node.outputs['Image'], file_output_image_node.inputs['Image'])
+        links.new(invert_node.outputs['Color'], file_output_depth_node.inputs['Image'])
+
+        bpy.ops.render.render(write_still=True) # JA: Rendering is done by this function
+
+    # shutil.copy(object_file, os.path.join(args.output_dir, object_uid, os.path.basename(object_file)))
+
+    for file_path in glob.glob(os.path.join(base_path, "*.png*")):
+        # Construct the new file name by removing the frame number
+        new_file_name = file_path.split('.png')[0] + '.png'
+        os.rename(file_path, new_file_name)
 
 def download_object(object_url: str) -> str:
     """Download the object and return the path."""
@@ -225,18 +297,18 @@ def download_object(object_url: str) -> str:
 
 
 if __name__ == "__main__":
-    try:
-        start_i = time.time()
-        if args.object_path.startswith("http"):
-            local_path = download_object(args.object_path)
-        else:
-            local_path = args.object_path
-        save_images(local_path)
-        end_i = time.time()
-        print("Finished", local_path, "in", end_i - start_i, "seconds")
-        # delete the object if it was downloaded
-        if args.object_path.startswith("http"):
-            os.remove(local_path)
-    except Exception as e:
-        print("Failed to render", args.object_path)
-        print(e)
+    # try:
+    start_i = time.time()
+    if args.object_path.startswith("http"):
+        local_path = download_object(args.object_path)
+    else:
+        local_path = args.object_path
+    save_images(local_path)
+    end_i = time.time()
+    print("Finished", local_path, "in", end_i - start_i, "seconds")
+    # delete the object if it was downloaded
+    if args.object_path.startswith("http"):
+        os.remove(local_path)
+    # except Exception as e:
+    #     print("Failed to render", args.object_path)
+    #     print(e)
