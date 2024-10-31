@@ -5,9 +5,12 @@ import multiprocessing
 import shutil
 import subprocess
 import time
+import struct
+
 from dataclasses import dataclass
 from typing import Optional
 from pathlib import Path
+import numpy as np
 
 import torch
 import kaolin
@@ -89,6 +92,28 @@ def convert_path(original_path):
     
     return new_path
 
+def sample_azimuth_theta():
+    # MJ: In Blender, the azimuth angle is measured from the X axis
+    # First, decide which range to sample from based on the probabilities
+
+    if np.random.rand() < 0.7:
+        # 70% chance to sample the "frontal" azimuth angles around the forward axis Y.
+        return np.random.randint(180, 360)
+    else:
+        # 30% chance to sample between 90° and 270°
+        return np.random.randint(0, 180)
+
+def sample_polar_phi():
+    if np.random.rand() < 0.7:
+        # 70% chance to sample the "middle" polar angles measured from the vertical Z axis
+        return np.random.randint(60, 120) #MJ: 120 = 90 + 30
+    else:
+        # 30% chance to sample the upper or bottom polar angles
+        if np.random.rand() < 0.5:
+            return np.random.randint(0, 60)
+        else:
+            return np.random.randint(120,180) #MJ: 120 = 90 + 30
+
 def save_tensor_to_path(tensor, tensor_name, original_path):
     # Convert the original path to the new path
     new_path = convert_path(original_path)
@@ -103,6 +128,25 @@ def save_tensor_to_path(tensor, tensor_name, original_path):
     torch.save(tensor, tensor_file_path)
     
     print(f"Tensor saved to {tensor_file_path}")
+
+def save_int_as_bin(integer, bin_name, original_path):
+    # Convert the original path to the new path
+    new_path = convert_path(original_path)
+    
+    # Ensure the directory exists
+    os.makedirs(new_path, exist_ok=True)
+    
+    # Define the tensor file path
+    tensor_file_path = new_path / f'{bin_name}.bin'
+
+    binary_data = struct.pack('h', integer)
+
+    with open(tensor_file_path, 'wb') as file:
+        file.write(binary_data)
+
+    with open(tensor_file_path, 'rb') as file:
+        binary_data = file.read()
+        decoded_azimuth = struct.unpack('h', binary_data)[0]
 
 def worker(
     queue: multiprocessing.JoinableQueue,
@@ -120,19 +164,29 @@ def worker(
         print(item, gpu)
 
         result_path = convert_path(item)
+
+        cond_polar = sample_polar_phi()
+        cond_azimuth = sample_azimuth_theta()
+
         command = (
             f"xvfb-run -n {display_num}"
             f" blender-3.2.2-linux-x64/blender -b -P scripts/blender_script.py --"
             f" --object_path {item} --output_dir {result_path}/.."
+            f" --cond_polar {cond_polar} --cond_azimuth {cond_azimuth}"
         )
         subprocess.run(command, shell=True)
 
         try:
             mesh_vertices, mesh_faces, mesh_uvs, mesh_face_uvs_idx = load_mesh(item)
+            if mesh_vertices is None or mesh_faces is None or mesh_uvs is None or mesh_face_uvs_idx is None:
+                raise ValueError
+
             save_tensor_to_path(mesh_vertices, "mesh_vertices", item)
             save_tensor_to_path(mesh_faces, "mesh_faces", item)
             save_tensor_to_path(mesh_uvs, "mesh_uvs", item)
             save_tensor_to_path(mesh_face_uvs_idx, "mesh_face_uvs_idx", item)
+
+            save_int_as_bin(cond_azimuth, "azimuth", item)
         except:
             print(f"Skipping mesh tensor saving of {item}")
 
