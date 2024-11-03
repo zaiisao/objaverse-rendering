@@ -208,12 +208,10 @@ def normalize_scene() -> None:
     Returns:
         None
     """
-
-    # #MJ: there will typically be only one root object left in get_scene_root_objects(), which is the parent_empty object itself.
     
     bbox_min, bbox_max = scene_bbox()
     scale = 1 / max(bbox_max - bbox_min)
-    #MJ:  the operation max(bbox_max - bbox_min) finds the largest dimension of the bounding box defined by bbox_min and bbox_max.
+    #MJ: The operation max(bbox_max - bbox_min) finds the largest dimension of the bounding box defined by bbox_min and bbox_max.
     # By setting scale = 1 / max(bbox_max - bbox_min), you’re calculating a scale factor that will shrink the largest dimension to 1 unit.
 
     for obj in scene_root_objects():
@@ -276,6 +274,7 @@ def save_images(object_file: str) -> None:
     # MJ: Resets the scene to a clean state:
     # Delete everything that isn't part of a camera or a light; the default Cube object in the blender scene is deleted
     reset_scene()
+    load_object(object_file)
     normalize_scene()          
     add_lighting() #MJ: delete the default light and add the area light
     
@@ -324,7 +323,7 @@ def save_images(object_file: str) -> None:
     # This is stored in scene.camera:  scene.objects["Camera"]:
     bpy.context.scene.camera = scene.objects["Camera"]
 
-    def render_from_angle(phi_from_Z_w, theta_from_X_w, camera_dist):
+    def render_from_angle(phi_from_Z_w, theta_from_X_w, camera_dist, render_image_index):
         #MJ: compute the camera position (X,Y,Z) in the world frame    
         point = (
             camera_dist * math.sin(phi_from_Z_w) * math.cos(theta_from_X_w),    # = x
@@ -335,8 +334,8 @@ def save_images(object_file: str) -> None:
         
         cam.location = point
 
-        image_file_name = f"{i:03d}.png"
-        depth_file_name = f"{i:03d}_depth.png"
+        image_file_name = f"{render_image_index:03d}.png"
+        depth_file_name = f"{render_image_index:03d}_depth.png"
 
         file_output_image_node.file_slots[0].path = image_file_name
         file_output_depth_node.file_slots[0].path = depth_file_name
@@ -357,28 +356,27 @@ def save_images(object_file: str) -> None:
         #MJ: The write_still=True argument specifies that Blender should save the rendered image to the file path set in scene.render.filepath.
 
     # MJ: refer to https://github.com/TencentARC/InstantMesh/issues/114
-    camera_dist = np.random.uniform(2.5, 5.0, 1)[0]
+    cond_camera_dist = np.random.uniform(2.5, 5.0, 1)[0]
 
     # JA: Set the elevation angle (absolute) and azimuth angle (relative) provided from arguments
-    phi_from_Z_w = math.radians(args.cond_polar)
-    theta_from_X_w = math.radians(args.cond_azimuth)
+    cond_phi_from_Z_w = math.radians(args.cond_polar)
+    cond_theta_from_X_w = math.radians(args.cond_azimuth)
 
-    starting_theta_from_X_w = theta_from_X_w
-
-    render_from_angle(phi_from_Z_w, theta_from_X_w, camera_dist)
+    render_from_angle(cond_phi_from_Z_w, cond_theta_from_X_w, cond_camera_dist, 0)
 
     for i in range(len(azimuths_o)):
         #MJ: 
         camera_dist = 0.5 / np.tan(np.radians(30/2))  #MJ: refer to https://github.com/SUDO-AI-3D/zero123plus/issues/73
         
-        theta_from_X_w = starting_theta_from_X_w + math.radians(azimuths_o[i]) #30, 90, 150, 210, 270, 330
+        theta_from_X_w = cond_theta_from_X_w + math.radians(azimuths_o[i]) #30, 90, 150, 210, 270, 330
         #Conver the relative azimuth angle theta_o to the absolute angle theta_w
         # theta_from_x_o is measured staring from the x axis, on the zx plane:
         
         #MJ: convert elevation angle to polar angle
         phi_from_Z_w = math.radians(90 - elevations_w[i])
-
-        render_from_angle(phi_from_Z_w, theta_from_X_w, camera_dist)
+        
+        render_image_index = i + 1 # JA: Index 0 is reserved for the cond image
+        render_from_angle(phi_from_Z_w, theta_from_X_w, camera_dist, render_image_index)
 
     for file_path in glob.glob(os.path.join(base_path, "*.png*")):
         # Construct the new file name by removing the frame number
