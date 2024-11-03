@@ -98,21 +98,19 @@ def sample_azimuth_theta():
 
     if np.random.rand() < 0.7:
         # 70% chance to sample the "frontal" azimuth angles around the forward axis Y.
-        return np.random.randint(180, 360)
+        if np.random.rand() < 0.5:
+            return np.random.randint(0, 90)
+        else:
+            return np.random.randint(270, 360)
     else:
         # 30% chance to sample between 90° and 270°
-        return np.random.randint(0, 180)
+        return np.random.randint(90, 270)
 
 def sample_polar_phi():
-    if np.random.rand() < 0.7:
-        # 70% chance to sample the "middle" polar angles measured from the vertical Z axis
-        return np.random.randint(60, 120) #MJ: 120 = 90 + 30
-    else:
-        # 30% chance to sample the upper or bottom polar angles
-        if np.random.rand() < 0.5:
-            return np.random.randint(0, 60)
-        else:
-            return np.random.randint(120,180) #MJ: 120 = 90 + 30
+    # JA: From https://github.com/TencentARC/InstantMesh/issues/114
+    # [-20, 45]:    90 - (-20) = 110,
+    #               90 - 45 = 45
+    return np.random.randint(45, 110)
 
 def save_tensor_to_path(tensor, tensor_name, original_path):
     # Convert the original path to the new path
