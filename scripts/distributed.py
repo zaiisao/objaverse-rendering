@@ -163,21 +163,47 @@ def worker(
 
         result_path = convert_path(item)
 
+        def add_temp_to_filename(file_path):
+            # JA: Split the path into directory, filename, and extension
+            directory, filename = os.path.split(file_path)
+            name, ext = os.path.splitext(filename)
+
+            new_filename = f"{name}_temp{ext}"
+            new_path = os.path.join(directory, new_filename)
+            
+            return new_path
+
+        # JA: Because it is dangerous to overwrite the dataset files with a modified version of the glb file,
+        # this script instead takes the approach of cloning the glb file to produce a temporary version, in
+        # which the mesh is deprived of animations. When this happens, the mesh will appear the same in both
+        # Kaolin and Blender.
+        temp_path = add_temp_to_filename(item)
+        object_uid = os.path.basename(item).split(".")[0]
+
+        subprocess.run(
+            (
+                f"blender-3.2.2-linux-x64/blender -b -P scripts/export_gltf_apply_transforms.py --"
+                f" --import_path {item} --export_path {temp_path}"
+            ), shell=True
+        )
+
         cond_polar = sample_polar_phi()
         cond_azimuth = sample_azimuth_theta()
 
-        command = (
-            f"xvfb-run -n {display_num}"
-            f" blender-3.2.2-linux-x64/blender -b -P scripts/blender_script.py --"
-            f" --object_path {item} --output_dir {result_path}/.."
-            f" --cond_polar {cond_polar} --cond_azimuth {cond_azimuth}"
-        )
-        subprocess.run(command, shell=True)
-
         try:
-            mesh_vertices, mesh_faces, mesh_uvs, mesh_face_uvs_idx = load_mesh(item)
+            mesh_vertices, mesh_faces, mesh_uvs, mesh_face_uvs_idx = load_mesh(temp_path)
             if mesh_vertices is None or mesh_faces is None or mesh_uvs is None or mesh_face_uvs_idx is None:
+                # JA: If all four required tensors from the mesh are not provided, skip it as we are unable
+                # to use it in the Zero123++ training process
                 raise ValueError
+            
+            command = (
+                f"xvfb-run -n {display_num}"
+                f" blender-3.2.2-linux-x64/blender -b -P scripts/blender_script.py --"
+                f" --object_path {temp_path} --output_dir {result_path}/.. --object_uid {object_uid}"
+                f" --cond_polar {cond_polar} --cond_azimuth {cond_azimuth}"
+            )
+            subprocess.run(command, shell=True)
 
             save_tensor_to_path(mesh_vertices, "mesh_vertices", item)
             save_tensor_to_path(mesh_faces, "mesh_faces", item)
@@ -187,6 +213,9 @@ def worker(
             save_int_as_bin(cond_azimuth, "azimuth", item)
         except:
             print(f"Skipping mesh tensor saving of {item}")
+
+        # JA: Regardless of whether the images were rendered with Blender, clean up the temporary file
+        os.remove(temp_path)
 
         if args.upload_to_s3:
             if item.startswith("http"):

@@ -31,6 +31,7 @@ import shutil
 import glob
 import urllib.request
 from typing import Tuple
+import traceback
 
 import bpy
 import numpy as np
@@ -40,22 +41,22 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "--object_path",
     type=str,
-    required=True,
+    #required=True,
     help="Path to the object file",
 )
+parser.add_argument("--object_uid", type=str)
 parser.add_argument("--output_dir", type=str, default="./views")
 parser.add_argument(
     "--engine", type=str, default="BLENDER_EEVEE", choices=["CYCLES", "BLENDER_EEVEE"]
 )
 parser.add_argument("--num_images", type=int, default=7)
 parser.add_argument("--camera_dist", type=float, default=1.5)
-parser.add_argument("--cond_polar", type=int)
-parser.add_argument("--cond_azimuth", type=int)
+parser.add_argument("--cond_polar", type=int, default=90)
+parser.add_argument("--cond_azimuth", type=int, default=-90)
 
 argv = sys.argv[sys.argv.index("--") + 1 :]
 args = parser.parse_args(argv)
-
-
+                             
 def enable_gpus(device_type, use_cpus=False):
     preferences = bpy.context.preferences
     cycles_preferences = preferences.addons["cycles"].preferences
@@ -154,17 +155,11 @@ def load_object(object_path: str) -> None:
         print(f"MJ: File not found and return: {object_path}")
         return
 
-    if object_path.endswith(".glb"):
-        #MJ: This command is specific to Blender and:
-        # Imports a .gltf or .glb file into Blender's scene as 3D objects.
-        # It reads the 3D data and ADDS it to Blender’s scene,
-        # allowing you to visualize and manipulate the objects within the Blender environment.
-        bpy.ops.import_scene.gltf(filepath=object_path, merge_vertices=True)
-
+    if object_path.endswith(".glb") or object_path.endswith(".gltf"):
+        bpy.ops.import_scene.gltf(filepath=object_path, merge_vertices=True, 
+                                   guess_original_bind_pose=False, bone_heuristic='TEMPERANCE')
     elif object_path.endswith(".fbx"):
         bpy.ops.import_scene.fbx(filepath=object_path)
-    elif object_path.endswith(".gltf"):
-        bpy.ops.import_scene.gltf(filepath=object_path, merge_vertices=True)    
     else:
         raise ValueError(f"Unsupported file type: {object_path}")
 
@@ -177,7 +172,8 @@ def scene_bbox(single_obj=None, ignore_matrix=False):
         for coord in obj.bound_box:
             coord = Vector(coord)
             if not ignore_matrix:
-                coord = obj.matrix_world @ coord
+                coord = obj.matrix_world @ coord  #MJ: Since obj.matrix_world includes obj.scale, the resulting bbox_min and bbox_max reflect the scaled, rotated, and translated position of the object in world space.
+                
             bbox_min = tuple(min(x, y) for x, y in zip(bbox_min, coord))
             bbox_max = tuple(max(x, y) for x, y in zip(bbox_max, coord))
     if not found:
@@ -216,7 +212,8 @@ def normalize_scene() -> None:
 
     for obj in scene_root_objects():
         obj.scale = obj.scale * scale #MJ: The scaling operation (obj.scale = obj.scale * scale) will only be applied to parent_empty, not to the child objects directly.
-
+        #MJ: when you perform obj.scale = obj.scale * scale in Blender, obj.matrix_world is automatically updated to reflect this new scale
+        
     #MJ: Blender's data model may not immediately reflect changes made by the script, 
     # especially when performing operations like setting parent-child relationships, moving objects, or modifying transforms.
     bpy.context.view_layer.update() #MJ: ensures that all pending updates are processed.
@@ -250,8 +247,8 @@ def setup_camera():
     cam = scene.objects["Camera"] #MJ: get the reference to the scene camera object
     cam.location = (0, 1.2, 0)  #MJ: (x,y,z)
 
-    #MJ: set the fov directly
-    cam.data.angle = math.radians(30)  # Set FOV to 30 degrees
+    cam.data.lens_unit = "FOV"
+    cam.data.angle = math.radians(30)
     
     cam_constraint = cam.constraints.new(type="TRACK_TO")
     #MJ: This adds a Track To constraint to the camera.
@@ -267,7 +264,7 @@ def setup_camera():
     
     return cam, cam_constraint
 
-def save_images(object_file: str) -> None:
+def save_images(object_file: str, object_uid: str) -> None:
     """Saves rendered images of the object in the scene."""
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -308,27 +305,26 @@ def save_images(object_file: str) -> None:
     file_output_depth_node = tree.nodes.new("CompositorNodeOutputFile")
 
     # Set base_path to the directory
-    object_uid = os.path.basename(object_file).split(".")[0]
     base_path = os.path.join(args.output_dir, object_uid)
 
     file_output_image_node.base_path = base_path
     file_output_depth_node.base_path = base_path
 
     #MJ: The fixed 6 view points for the target images (zero123plus frame, the same as the Blender frame);
-    azimuths_o = [30, 90, 150, 210, 270, 330]
-    elevations_w = [20, -10, 20, -10, 20, -10]
+    azimuths_rel = [30, 90, 150, 210, 270, 330]
+    elevations_abs = [20, -10, 20, -10, 20, -10]
 
     #MJ: Blender uses the active camera for rendering. 
     # The active camera is the camera that is set as the primary camera in the scene for rendering purposes.
     # This is stored in scene.camera:  scene.objects["Camera"]:
     bpy.context.scene.camera = scene.objects["Camera"]
 
-    def render_from_angle(phi_from_Z_w, theta_from_X_w, camera_dist, render_image_index):
+    def render_from_angle(phi_from_Z, theta_from_X, camera_dist, render_image_index):
         #MJ: compute the camera position (X,Y,Z) in the world frame    
         point = (
-            camera_dist * math.sin(phi_from_Z_w) * math.cos(theta_from_X_w),    # = x
-            camera_dist * math.sin(phi_from_Z_w) * math.sin(theta_from_X_w),    # = y
-            camera_dist * math.cos(phi_from_Z_w),                               # = z
+            camera_dist * math.sin(phi_from_Z) * math.cos(theta_from_X),    # = x
+            camera_dist * math.sin(phi_from_Z) * math.sin(theta_from_X),    # = y
+            camera_dist * math.cos(phi_from_Z),                               # = z
         )
         #MJ: set the current camera location in the world frame
         
@@ -359,24 +355,25 @@ def save_images(object_file: str) -> None:
     cond_camera_dist = np.random.uniform(2.5, 5.0, 1)[0]
 
     # JA: Set the elevation angle (absolute) and azimuth angle (relative) provided from arguments
-    cond_phi_from_Z_w = math.radians(args.cond_polar)
-    cond_theta_from_X_w = math.radians(args.cond_azimuth)
+    cond_phi_from_Z = math.radians(args.cond_polar)
+    cond_theta_from_X = math.radians(args.cond_azimuth)  
 
-    render_from_angle(cond_phi_from_Z_w, cond_theta_from_X_w, cond_camera_dist, 0)
+    render_from_angle(cond_phi_from_Z, cond_theta_from_X, cond_camera_dist, 0)
 
-    for i in range(len(azimuths_o)):
-        #MJ: 
-        camera_dist = 0.5 / np.tan(np.radians(30/2))  #MJ: refer to https://github.com/SUDO-AI-3D/zero123plus/issues/73
+    for i in range(len(azimuths_rel)):
+        camera_dist1 = 0.5 / np.tan(np.radians(30/2))  #MJ: refer to https://github.com/SUDO-AI-3D/zero123plus/issues/73
+        camera_dist2 = (0.5 * (1 + np.tan(np.radians(30/2)))) / np.tan(np.radians(30/2))
+        camera_dist3 = (camera_dist1 + camera_dist2) / 2
+
+        camera_dist = camera_dist2
         
-        theta_from_X_w = cond_theta_from_X_w + math.radians(azimuths_o[i]) #30, 90, 150, 210, 270, 330
-        #Conver the relative azimuth angle theta_o to the absolute angle theta_w
-        # theta_from_x_o is measured staring from the x axis, on the zx plane:
+        theta_from_X = cond_theta_from_X + math.radians(azimuths_rel[i]) #30, 90, 150, 210, 270, 330
         
         #MJ: convert elevation angle to polar angle
-        phi_from_Z_w = math.radians(90 - elevations_w[i])
+        phi_from_Z = math.radians(90 - elevations_abs[i])
         
         render_image_index = i + 1 # JA: Index 0 is reserved for the cond image
-        render_from_angle(phi_from_Z_w, theta_from_X_w, camera_dist, render_image_index)
+        render_from_angle(phi_from_Z, theta_from_X, camera_dist, render_image_index)
 
     for file_path in glob.glob(os.path.join(base_path, "*.png*")):
         # Construct the new file name by removing the frame number
@@ -406,7 +403,8 @@ if __name__ == "__main__":
         else:
             local_path = args.object_path
             
-        save_images(local_path)
+        object_uid = args.object_uid
+        save_images(local_path, object_uid)
         
         end_i = time.time()
         print("Finished", local_path, "in", end_i - start_i, "seconds")
@@ -414,5 +412,6 @@ if __name__ == "__main__":
         if args.object_path.startswith("http"):
             os.remove(local_path)
     except Exception as e:
+        print(traceback.format_exc())
         print("Failed to render", args.object_path)
         print(e)
